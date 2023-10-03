@@ -1,107 +1,27 @@
 public with sharing class MobileMapLayersService {
 
     @AuraEnabled(cacheable=false)
-    public static List<Decimal> getAssignedResourceLocation() {
+    public static List<Map<String, String>> getAllPicklistOptions(String obj, String field) {
         try {
-            List<Decimal> location = new List<Decimal>();
-            Id userId = System.UserInfo.getUserId();
-            if (userId != null) {
-                List<ServiceResource> resource = [Select LastKnownLatitude, LastKnownLongitude from ServiceResource where RelatedRecordId = :userId LIMIT 1];
-                if (resource.size() > 0) {
-                    location.add(resource[0].LastKnownLatitude);
-                    location.add(resource[0].LastKnownLongitude);
-                }
+            SObjectType objType = Schema.getGlobalDescribe().get(obj);
+            Map<String, Schema.SObjectField> fields = objType.getDescribe().fields.getMap();
+            Schema.DescribeFieldResult dfr = fields.get(field).getDescribe();
+
+            List<Map<String, String>> picklistOptions = new List<Map<String, String>>();
+            Map<String, String> temp = new Map<String, String>();
+
+            List<Schema.PicklistEntry> picklistVals = dfr.getPicklistValues();
+            for( Schema.PicklistEntry picklistVal : picklistVals){
+                temp = new Map<String, String>();
+                temp.put('value', picklistVal.getValue());
+                temp.put('label', picklistVal.getLabel());
+                picklistOptions.add(temp);
             }
-            return location;
+
+            return picklistOptions;
         } catch (Exception e) {
             throw new HandledException(e.getMessage());
         }
-    }
-
-    @AuraEnabled(cacheable=false)
-    public static List<Map<String, String>> getObjectLocations(String value, String latField, String longField, String titleField, String detailField) {
-        try {
-            List<Map<String, String>> locations = new List<Map<String, String>>();
-
-            // verify object and fields are valid and accessible
-            if (!isSafeObject(value) ||
-                !isSafeField(value, latField) ||
-                !isSafeField(value, longField) ||
-                !isSafeField(value, titleField) ||
-                !isSafeField(value, detailField))
-                return locations;
-
-            List<String> params = new List<String>{ latField, longField, titleField, detailField, value };
-            List<sObject> records = Database.Query(String.format('SELECT {0}, {1}, {2}, {3} FROM {4} WHERE {0} != null and {1} != null', params));
-            Map<String, String> tempList;
-            for (sObject rec : records) {
-                tempList = new Map<String, String>();
-                tempList.put('Id', rec.Id);
-                tempList.put('Latitude', String.valueOf(rec.get(latField)));
-                tempList.put('Longitude', String.valueOf(rec.get(longField)));
-                tempList.put('TitleField', String.valueOf(rec.get(titleField)));
-                tempList.put('DetailField', String.valueOf(rec.get(detailField)));
-                locations.add(tempList);
-            }
-            return locations;
-        } catch (Exception e) {
-            throw new HandledException(e.getMessage());
-        }
-    }
-
-    @AuraEnabled(cacheable=false)
-    public static List<Map<String, String>> retrieveAllObjFields(String value) {
-        SObjectType objType = Schema.getGlobalDescribe().get(value);
-        Map<String, Schema.SObjectField> fields = objType.getDescribe().fields.getMap();
-        Set<String> fieldsKeys = fields.keySet();
-
-        List<Map<String, String>> fieldsInfo = new List<Map<String, String>>();
-        Map<String, String> temp = new Map<String, String>();
-        Schema.DescribeFieldResult field;
-
-        for (String key : fieldsKeys) {
-            field = fields.get(key).getDescribe();
-            temp = new Map<String, String>();
-            temp.put('value', key);
-            temp.put('label', field.getLabel());
-            temp.put('type', field.getType().name());
-            fieldsInfo.add(temp);
-        }
-
-        return fieldsInfo;
-    }
-
-    @AuraEnabled(cacheable=false)
-    public static Map<String, String> retrieveObjInfo(String value) {
-        Map<String, String> info = new Map<String, String>();
-        SObjectType objType = Schema.getGlobalDescribe().get(value);
-        Schema.DescribeSObjectResult objDescribe = objType.getDescribe();
-        info.put('Label', objDescribe.getLabel());
-        info.put('Plural', objDescribe.getLabelPlural());
-        
-        // get object's icon
-    	List<Schema.DescribeTabSetResult> tabSetDesc = Schema.describeTabs();
-        List<Schema.DescribeTabResult> tabDesc = new List<Schema.DescribeTabResult>();
-        for (Schema.DescribeTabSetResult tsr : tabSetDesc) { tabDesc.addAll(tsr.getTabs()); }
-        
-        List<Schema.DescribeIconResult> icons;
-        List<Schema.DescribeColorResult> colorDesc;
-        for (Schema.DescribeTabResult tr : tabDesc) {
-            if (value == tr.getSobjectName()) {
-                icons = tr.getIcons();
-                for (DescribeIconResult icon : icons) {
-                    if (icon.getTheme() == 'theme4' || icon.getTheme() == 'custom') {
-                        info.put('IconUrl', icon.getUrl());
-                        break;
-                    }
-                }
-                colorDesc = tr.getColors();
-                info.put('Color', '#' + colorDesc[0].getColor());
-                break;
-            }
-        }
-        
-        return info;
     }
 
     @AuraEnabled(cacheable=false)
@@ -115,7 +35,7 @@ public with sharing class MobileMapLayersService {
 
             // verify object and fields are valid and accessible
             if (!isSafeObject(currentObjectFilter) ||
-                !isSafeField(currentObjectFilter, fieldName))
+                !isSafeField(currentObjectFilter, fieldName.toLowerCase()))
                 return results;
 
             // sanitize input: cast and escape quotes
@@ -162,9 +82,8 @@ public with sharing class MobileMapLayersService {
         return myObj.getDescribe().isAccessible();
     }
 
-    private static boolean isSafeField(String objName, String fieldName){ 
-        if (isSafeObject(objName) && fieldName != null) {
-            fieldName = fieldName.toLowerCase();
+    private static boolean isSafeField(String objName, String fieldName){
+        if (isSafeObject(objName)) {
             SObjectType myObj = Schema.getGlobalDescribe().get(objName);
             SObjectField myField = myObj.getDescribe().fields.getMap().get(fieldName);
             return myField.getDescribe().isAccessible();

@@ -1,18 +1,18 @@
-import { LightningElement } from 'lwc';
+import { LightningElement, wire } from 'lwc';
+import { gql, graphql } from 'lightning/uiGraphQLApi';
+import { getObjectInfos } from 'lightning/uiObjectInfoApi';
 import { NavigationMixin } from 'lightning/navigation';
-import retrieveAllObjFields from '@salesforce/apex/MobileMapLayersService.retrieveAllObjFields';
-import retrieveObjInfo from '@salesforce/apex/MobileMapLayersService.retrieveObjInfo';
-import getAssignedResourceLocation from '@salesforce/apex/MobileMapLayersService.getAssignedResourceLocation';
-import getObjectLocations from '@salesforce/apex/MobileMapLayersService.getObjectLocations';
 import executeFilterQuery from '@salesforce/apex/MobileMapLayersService.executeFilterQuery';
 import Id from '@salesforce/user/Id';
 import { config } from './config';
+import ConfirmModal from 'c/confirmModal';
 import overrideCSS from './overrideCSS';
 
 export default class MobileMapLayersMain extends NavigationMixin(LightningElement) {
   CONFIG = config;
   userId = Id;
   resourceLocation = { lat: '0.0', lng: '0.0' };
+  isResourceLocationSet = false;
   allMarkers = [];
   filteredMarkers = [];
   currentMarker;
@@ -28,11 +28,14 @@ export default class MobileMapLayersMain extends NavigationMixin(LightningElemen
     isActive: false,
     field: { value: '', label: '', type: '', input: '' },
   };
+  fullQuery;
   init = false;
+
+  queriedObjects;
+  objQueries = [];
 
   connectedCallback() {
     if (!['km', 'mi'].includes(this.CONFIG.distanceUnit)) this.CONFIG.distanceUnit = 'km';
-    this.addLocations();
 
     const myStyle = document.createElement('style');
     myStyle.innerHTML = overrideCSS;
@@ -43,67 +46,194 @@ export default class MobileMapLayersMain extends NavigationMixin(LightningElemen
     if (!this.init) {
       this.init = true;
       window.visualViewport?.addEventListener('resize', (e) => {
-        if (window.visualViewport.height === window.innerHeight)
-          this.template.querySelector(
-            '.find-nearby-main-container'
-          ).style.top = `${window.visualViewport.pageTop.toString()}px`;
+        if (window.visualViewport.height === window.innerHeight) window.scrollTo(0, 0);
       });
+    }
+  }
+
+  // Get resource lcation (triggers the whole process)
+
+  @wire(graphql, {
+    query: gql`
+      query resourceLocation($userId: ID) {
+        uiapi {
+          query {
+            ServiceResource(where: { RelatedRecordId: { eq: $userId } }) {
+              edges {
+                node {
+                  Id
+                  LastKnownLatitude {
+                    value
+                  }
+                  LastKnownLongitude {
+                    value
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `,
+    variables: '$userIdVariable',
+  })
+  GetAssignedResourceLocation({ data, errors }) {
+    if (data?.uiapi && !this.isResourceLocationSet) {
+      const location = data.uiapi.query.ServiceResource.edges[0].node;
+      const lat = location?.LastKnownLatitude?.value;
+      const lng = location?.LastKnownLongitude?.value;
+
+      if (lat && lng) {
+        this.resourceLocation = { lat, lng };
+      }
+
+      this.template.querySelector('c-mobile-map')?.setResourceMarker(this.resourceLocation);
+      this.isResourceLocationSet = true;
+
+      this.addLocations();
+    } else if (errors) {
+      this.handleError(errors);
     }
   }
 
   // Add objects
 
-  async addLocations() {
+  addLocations() {
     try {
-      // add resource
-      const resourceLocation = await getAssignedResourceLocation();
-      if (resourceLocation?.length && resourceLocation[0] && resourceLocation[1]) {
-        this.resourceLocation = {
-          lat: resourceLocation[0],
-          lng: resourceLocation[1],
-        };
-      }
-      this.template.querySelector('c-mobile-map').setResourceMarker(this.resourceLocation);
-
-      // add other locations
-      let fields;
-      let objInfo;
-      this.CONFIG.mapObjects.forEach(async (o, ind) => {
-        fields = await retrieveAllObjFields(o);
-        o.fields = fields;
-        objInfo = await retrieveObjInfo(o);
-        o.label = objInfo?.Label;
-        o.plural = objInfo?.Plural;
-        o.iconUrl = objInfo?.IconUrl;
-        o.color = objInfo?.Color ?? '#4bc076';
-        if (ind === this.CONFIG.mapObjects.length - 1)
-          this.CONFIG.mapObjects = [...this.CONFIG.mapObjects];
-        if (ind === 0) this.setCurrentObjectFilter(o); // the first object is the default one shown
-        this.addAllObjectsLocations(o);
-      });
+      this.queriedObjects = this.CONFIG.mapObjects.map((o) => o.value);
     } catch (error) {
       this.handleError(error);
     }
   }
 
-  async addAllObjectsLocations(obj) {
+  @wire(getObjectInfos, { objectApiNames: '$queriedObjects' })
+  async getObjectInfos({ data, error }) {
+    if (data) {
+      const allObjResults = data.results;
+
+      this.CONFIG.mapObjects.forEach(async (o, ind) => {
+        const objResult = allObjResults.find((r) => r.result?.apiName === o.value)?.result;
+
+        const fields = Object.entries(objResult.fields).map(([_, value]) => ({
+          value: value.apiName,
+          label: value.label,
+          type: value.dataType,
+        }));
+
+        o.fields = fields;
+        o.firstDetailFieldLabel = o.fields?.find(
+          (f) => f.value.toLowerCase() === o.firstDetailField.toLowerCase()
+        )?.label;
+        o.secondDetailFieldLabel = o.fields?.find(
+          (f) => f.value.toLowerCase() === o.secondDetailField.toLowerCase()
+        )?.label;
+        o.thirdDetailFieldLabel = o.fields?.find(
+          (f) => f.value.toLowerCase() === o.thirdDetailField.toLowerCase()
+        )?.label;
+
+        // add object properties
+        o.label = objResult.label;
+        o.plural = objResult.labelPlural;
+        o.iconUrl = objResult.themeInfo.iconUrl;
+        o.color = `#${objResult.themeInfo.color ?? '4bc076'}`;
+        o.infoReceived = true;
+
+        this.objQueries.push(this.buildQueryForObject(o));
+
+        // the first object is the default one shown
+        if (ind === 0) {
+          this.setCurrentObjectFilter(o);
+        }
+
+        // if all objects' info received
+        if (this.CONFIG.mapObjects.every((obj) => obj.infoReceived)) {
+          this.CONFIG.mapObjects = [...this.CONFIG.mapObjects];
+          this.fullQuery = this.buildFullQuery(this.objQueries);
+        }
+      });
+    } else if (error) {
+      this.handleError(error);
+    }
+  }
+
+  buildQueryForObject = (obj) => {
+    const q = `${obj.value}: ${obj.value} (where: { and: [{ ${obj.latField}: { ne: null } }, { ${obj.longField}: { ne: null } }] }, first: 500) @category(name: "recordQuery") {
+                edges {
+                  node {
+                    Id
+                    ${obj.latField} {
+                      value
+                    }
+                    ${obj.longField} {
+                      value
+                    }
+                    ${obj.titleField} {
+                      value
+                    }
+                    ${obj.firstDetailField} {
+                      value
+                    }
+                    ${obj.secondDetailField} {
+                      value
+                    }
+                    ${obj.thirdDetailField} {
+                      value
+                    }
+                  }
+                }
+              }`;
+    return q;
+  };
+
+  buildFullQuery = (objQueries) => {
+    const q = `query GetLocations {
+      uiapi {
+        query {
+          ${objQueries.join('\n')}
+        }
+      }
+    }`;
+    return gql`
+      ${q}
+    `;
+  };
+
+  @wire(graphql, {
+    query: '$fullQuery',
+  })
+  GetObjectLocationsResults({ data, errors }) {
+    if (data) {
+      let objData;
+      let records;
+      let fieldsList;
+      this.CONFIG.mapObjects.forEach((obj) => {
+        objData = data.uiapi?.query[obj.value]?.edges ?? [];
+        records = [];
+        for (let record of objData) {
+          fieldsList = Object.values(record.node).map((v) => v?.value ?? v);
+          records.push({
+            id: fieldsList[0],
+            latitude: fieldsList[1],
+            longitude: fieldsList[2],
+            titleFieldValue: fieldsList[3],
+            firstDetailFieldValue: fieldsList[4],
+            secondDetailFieldValue: fieldsList[5],
+            thirdDetailFieldValue: fieldsList[6],
+          });
+        }
+        this.addAllObjectsLocations(obj.value, records);
+      });
+    }
+    if (errors) {
+      this.handleError(errors);
+    }
+  }
+
+  async addAllObjectsLocations(objName, records) {
     try {
-      let detailFieldLabel = obj.fields?.find(
-        (f) => f.value === obj.detailField.toLowerCase()
-      )?.label;
-      const records = await getObjectLocations(obj);
+      const obj = this.CONFIG.mapObjects.find((o) => o.value === objName);
       records?.forEach((rec) => {
-        this.createMarker(
-          obj.value,
-          rec.Id,
-          rec.Latitude,
-          rec.Longitude,
-          obj.iconUrl,
-          obj.color,
-          rec.TitleField,
-          detailFieldLabel,
-          rec.DetailField
-        );
+        this.createMarker(obj, rec);
       });
     } catch (error) {
       this.handleError(error);
@@ -112,36 +242,17 @@ export default class MobileMapLayersMain extends NavigationMixin(LightningElemen
 
   // Markers
 
-  createMarker(
-    type,
-    id,
-    latitude,
-    longitude,
-    iconUrl,
-    color,
-    title,
-    detailFieldName,
-    detailFieldValue
-  ) {
-    const navUrl = `com.salesforce.fieldservice://v1/sObject/${id}/details`;
-    const routeUrl = `https://www.google.com/maps/dir/?api=1&destination=${latitude},${longitude}&travelmode=driving`;
-    const distance = this.getDistanceFromEng(latitude, longitude);
+  createMarker(objDetails, recordDetails) {
+    const lat = recordDetails.latitude;
+    const long = recordDetails.longitude;
+    const navUrl = `com.salesforce.fieldservice://v1/sObject/${recordDetails.id}/details`;
+    const routeUrl = `https://www.google.com/maps/dir/?api=1&destination=${lat},${long}&travelmode=driving`;
+    const distance = this.getDistanceFromEng(lat, long);
 
     const marker = {
-      location: { Latitude: latitude, Longitude: longitude },
-      mapIcon: this.getMarkerSVG(color),
-      value: {
-        type,
-        id,
-        iconUrl,
-        color,
-        title,
-        detailFieldName,
-        detailFieldValue,
-        navUrl,
-        routeUrl,
-        distance,
-      },
+      location: { Latitude: lat, Longitude: long },
+      mapIcon: this.getMarkerSVG(objDetails.color),
+      value: { ...objDetails, ...recordDetails, navUrl, routeUrl, distance },
     };
     this.addToMarkers(marker);
   }
@@ -169,7 +280,7 @@ export default class MobileMapLayersMain extends NavigationMixin(LightningElemen
       }
     } else {
       this.filteredMarkers = this.allMarkers.filter(
-        (m) => m.value.type === this.currentObjectFilter.value
+        (m) => m.value.value === this.currentObjectFilter.value
       );
     }
 
@@ -189,14 +300,27 @@ export default class MobileMapLayersMain extends NavigationMixin(LightningElemen
 
   // Actions Handlers
 
-  redirectToMarkerDetails = (ind) => {
+  redirectToMarkerDetails = async (ind) => {
     const index = ind ?? this.currentMarkerInd;
-    this[NavigationMixin.Navigate]({
-      type: 'standard__webPage',
-      attributes: {
-        url: this.filteredMarkers[index].value.navUrl,
-      },
-    });
+
+    let toOpen = true;
+    if (this.isIos()) {
+      toOpen = await ConfirmModal.open({
+        content: 'Opening the record resets your search.',
+        header: 'Open Record?',
+        okButtonText: 'Open Record',
+        cancelButtonText: 'Cancel',
+      });
+    }
+
+    if (toOpen) {
+      this[NavigationMixin.Navigate]({
+        type: 'standard__webPage',
+        attributes: {
+          url: this.filteredMarkers[index].value.navUrl,
+        },
+      });
+    }
   };
 
   routeToMarkerLocation = (ind) => {
@@ -222,6 +346,12 @@ export default class MobileMapLayersMain extends NavigationMixin(LightningElemen
   };
 
   // Getters & Helpers
+
+  get userIdVariable() {
+    return {
+      userId: this.userId,
+    };
+  }
 
   get currentObject() {
     return this.currentObjectFilter;
@@ -251,6 +381,15 @@ export default class MobileMapLayersMain extends NavigationMixin(LightningElemen
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
     return R * c;
   }
+
+  isIos = () => {
+    const isIpad =
+      navigator.userAgent.includes('Macintosh') &&
+      navigator.maxTouchPoints &&
+      navigator.maxTouchPoints > 1;
+    const isIphone = navigator.platform.includes('iPhone');
+    return isIpad || isIphone;
+  };
 
   getMarkerSVG(color) {
     const icon = `<?xml version="1.0"?>

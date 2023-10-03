@@ -2,10 +2,13 @@
 # Set Up the Find Nearby Lightning Web Component (LWC)
 Help your mobile workers figure out what records are close by. For example, mobile workers can search for service appointments to see where to go next. Or, they can search for a part they need to complete the task.
 
+**Note:** Find Nearby LWC is an open-source component and is not supported by Salesforce Support.
+
 ## Before You Begin
 We recommend taking the [Quick Start: Lightning Web Components](https://trailhead.salesforce.com/content/learn/projects/quick-start-lightning-web-components) Trailhead to learn how to:
 * Set up your Salesforce DX environment
 * Set up Visual Studio Code
+* Make sure your org is updated to the Summer '23 version and higher
 * Authorize your org
 
 ## Set Up the LWC
@@ -51,3 +54,11 @@ We recommend taking the [Quick Start: Lightning Web Components](https://trailhea
 5. Connect the LWC to a global action. See Add Global Actions to the Field Service Mobile App.  
     1. For Action Type, select **Lightning Web Components**.  
     2. For Lightning Web Component, select **c:mobileMapLayersMain**.
+6. To see the map on a mobile device, add  the map URL to the org’s trusted URLs. For more information, see [lightning-map](https://developer.salesforce.com/docs/component-library/bundle/lightning-map/documentation).
+    1. From Setup, in the Quick Find box, enter `Security` and select  **Trusted URLs**.
+    2. Click **New Trusted URL**.
+    3. Enter an API Name.
+    4. For URL, enter `maps.a.forceusercontent.com`.
+    5. Select **frame-src (iframe content)**.
+    6. Save your changes.
+  
